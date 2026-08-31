@@ -177,9 +177,9 @@ OPENAI_RESPONSES_PATH = os.getenv(
 # Model families served by the OpenAI Responses endpoint (/responses) per the
 # OpenCode Go model table. Everything else OpenAI (glm-,kimi-,longcat-,
 # deepseek-,mimo-,hy3-,hy4-,o1-,o3-,text-...) defaults to chat completions.
-# ⚠️ JANGAN tambahkan "opencode-" di sini (atau di OPENAI_MODEL_PATTERNS): itu
-# org prefix "opencode-go/<id>", bukan model family — semua model OpenCode Go
-# bakal ke-hijack ke /responses (lihat kasus opencode-go/hy3 → 502).
+# JANGAN tambahkan "opencode-" di sini (atau di OPENAI_MODEL_PATTERNS): itu
+# org prefix "opencode-go/<id>", bukan model family - semua model OpenCode Go
+# bakal ke-hijack ke /responses (lihat kasus opencode-go/hy3 -> 502).
 OPENAI_RESPONSES_MODEL_PATTERNS = [
     t.strip()
     for t in os.getenv(
@@ -193,7 +193,7 @@ OPENAI_RESPONSES_MODEL_PATTERNS = [
 OPENAI_MESSAGES_PATH = os.getenv("CSMART_OPENAI_MESSAGES_PATH", "/messages")
 
 # Model families served by that Anthropic-compatible /messages endpoint
-# (minimax-m*, qwen3.*). These speak Anthropic-native protocol — NO OpenAI
+# (minimax-m*, qwen3.*). These speak Anthropic-native protocol - NO OpenAI
 # protocol transform, client model name preserved verbatim, raw SSE passthrough.
 ANTHROPIC_NATIVE_MODEL_PATTERNS = [
     t.strip()
@@ -204,11 +204,159 @@ ANTHROPIC_NATIVE_MODEL_PATTERNS = [
     if t.strip()
 ]
 
+# --- Track A: Model Resolver & Config (OPENAI_MODEL_MAP) ---
+# JSON env CSMART_OPENAI_MODEL_MAP: Key=alias, value={target, endpoint_type}
+# endpoint_type: "responses" | "chat_completions" | "messages"
+# Default map dari docs/endpoints-opencode.md:
+#   responses=[grok-4.6,gpt-5.6-luna,muse-spark-1.2-contributor]
+#   chat=[glm-*,kimi-*,deepseek-*,mimo-*,hy3,hy4]
+#   messages=[minimax-m*,qwen3*]
+def _load_openai_model_map():
+    _defaults = {
+        # responses
+        "grok-4.6": {"target": "grok-4.6", "endpoint_type": "responses"},
+        "grok-4": {"target": "grok-4.6", "endpoint_type": "responses"},
+        "gpt-5.6-luna": {"target": "gpt-5.6-luna", "endpoint_type": "responses"},
+        "muse-spark-1.2-contributor": {"target": "muse-spark-1.2-contributor", "endpoint_type": "responses"},
+        "muse-spark": {"target": "muse-spark-1.2-contributor", "endpoint_type": "responses"},
+        # chat
+        "glm-*": {"target": "glm-5.3", "endpoint_type": "chat_completions"},
+        "glm-": {"target": "glm-5.3", "endpoint_type": "chat_completions"},
+        "kimi-*": {"target": "kimi-k3", "endpoint_type": "chat_completions"},
+        "kimi-": {"target": "kimi-k3", "endpoint_type": "chat_completions"},
+        "deepseek-*": {"target": "deepseek-v4-flash", "endpoint_type": "chat_completions"},
+        "deepseek-": {"target": "deepseek-v4-flash", "endpoint_type": "chat_completions"},
+        "mimo-*": {"target": "mimo-v2.5", "endpoint_type": "chat_completions"},
+        "mimo-": {"target": "mimo-v2.5", "endpoint_type": "chat_completions"},
+        "hy3": {"target": "hy3", "endpoint_type": "chat_completions"},
+        "hy4": {"target": "hy4-preview", "endpoint_type": "chat_completions"},
+        "hy4-*": {"target": "hy4-preview", "endpoint_type": "chat_completions"},
+        "hy4-": {"target": "hy4-preview", "endpoint_type": "chat_completions"},
+        # messages (Anthropic-native on OpenCode Go)
+        "minimax-m*": {"target": "minimax-m3", "endpoint_type": "messages"},
+        "minimax-m3": {"target": "minimax-m3", "endpoint_type": "messages"},
+        "minimax-": {"target": "minimax-m3", "endpoint_type": "messages"},
+        "qwen3*": {"target": "qwen3.8-max", "endpoint_type": "messages"},
+        "qwen3": {"target": "qwen3.8-max", "endpoint_type": "messages"},
+        "qwen3-*": {"target": "qwen3.8-max", "endpoint_type": "messages"},
+    }
+    raw = __import__("os").getenv("CSMART_OPENAI_MODEL_MAP", "").strip()
+    if raw:
+        try:
+            _parsed = __import__("json").loads(raw)
+            if isinstance(_parsed, dict):
+                for _k, _v in _parsed.items():
+                    if isinstance(_v, dict) and "endpoint_type" in _v:
+                        _et = str(_v.get("endpoint_type", "")).strip().lower()
+                        if _et in ("chat", "chat_completions", "chat.completions"):
+                            _et = "chat_completions"
+                        elif _et in ("response", "responses"):
+                            _et = "responses"
+                        elif _et in ("messages", "anthropic", "message"):
+                            _et = "messages"
+                        _tgt = str(_v.get("target", _k)).strip() or _k
+                        _defaults[_k] = {"target": _tgt, "endpoint_type": _et}
+                    elif isinstance(_v, str):
+                        _et = _v.strip().lower()
+                        if _et in ("chat", "chat_completions"):
+                            _et = "chat_completions"
+                        elif _et in ("response", "responses"):
+                            _et = "responses"
+                        elif _et in ("messages", "message"):
+                            _et = "messages"
+                        _defaults[_k] = {"target": _k, "endpoint_type": _et}
+        except Exception:
+            pass
+    return _defaults
+
+
+OPENAI_MODEL_MAP = _load_openai_model_map()
+
+
+def _model_matches_alias(model, alias):
+    _ml = model.lower()
+    _al = alias.lower()
+    if "*" in _al:
+        _prefix = _al.replace("*", "")
+        return _ml.startswith(_prefix) or _ml == _prefix.rstrip("-") or _prefix in _ml
+    if _al.endswith("-"):
+        return _al in _ml or _ml.startswith(_al)
+    return _ml == _al or _al in _ml or _ml.startswith(_al)
+
+
+def clean_openai_model_name(model_name):
+    if not model_name:
+        return model_name
+    if "/" in model_name:
+        if model_name.lower().startswith("opencode-go/"):
+            return model_name.split("/", 1)[-1]
+        return model_name.rsplit("/", 1)[-1]
+    return model_name
+
+
+def is_openai_model(model_name):
+    if not model_name:
+        return False
+    _cleaned = clean_openai_model_name(model_name)
+    _lower = _cleaned.lower()
+    for _alias in OPENAI_MODEL_MAP:
+        if _model_matches_alias(_cleaned, _alias):
+            return True
+    if any(pat.lower() in _lower for pat in OPENAI_MODEL_PATTERNS):
+        return True
+    if any(pat.lower() in _lower for pat in OPENAI_RESPONSES_MODEL_PATTERNS):
+        return True
+    if any(pat.lower() in _lower for pat in ANTHROPIC_NATIVE_MODEL_PATTERNS):
+        return True
+    return False
+
+
+def resolve_openai_endpoint(model):
+    if not model:
+        return "chat_completions"
+    _cleaned = clean_openai_model_name(model).lower()
+    _orig_lower = model.lower()
+    for _alias, _info in OPENAI_MODEL_MAP.items():
+        if _model_matches_alias(_cleaned, _alias) or _model_matches_alias(_orig_lower, _alias):
+            _et = str(_info.get("endpoint_type", "")).strip().lower()
+            if _et in ("responses", "response"):
+                return "responses"
+            if _et in ("messages", "message", "anthropic"):
+                return "messages"
+            return "chat_completions"
+    if any(pat.lower() in _cleaned for pat in ANTHROPIC_NATIVE_MODEL_PATTERNS):
+        return "messages"
+    if any(pat.lower() in _cleaned for pat in OPENAI_RESPONSES_MODEL_PATTERNS):
+        return "responses"
+    if "response" in _cleaned or "responses" in _cleaned:
+        return "responses"
+    return "chat_completions"
+
+
+def _openai_upstream_headers(request):
+    _auth = ""
+    try:
+        _auth = request.headers.get("authorization", "") or request.headers.get("Authorization", "")
+    except Exception:
+        _auth = ""
+    if _auth and str(_auth).strip():
+        _bearer = str(_auth).strip()
+        if not _bearer.lower().startswith("bearer "):
+            _bearer = f"Bearer {_bearer}"
+        return {
+            "Authorization": _bearer,
+            "Content-Type": "application/json",
+        }
+    return {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
 # Model-id aliases applied on the OpenAI path only. OpenCode Go doesn't serve
-# DeepSeek's real API ids (deepseek-chat / deepseek-reasoner — those belong to
+# DeepSeek's real API ids (deepseek-chat / deepseek-reasoner - those belong to
 # the DeepSeek upstream passthrough), so map them to OpenCode Go's v4 ids so the
 # documented FLASH/FLAGSHIP defaults keep working when routed to OpenCode Go.
-OPENAI_MODEL_ALIASES: Dict[str, str] = {
+OPENAI_MODEL_ALIASES = {
     os.getenv("CSMART_ALIAS_DEEPSEEK_CHAT", "deepseek-chat"): os.getenv(
         "CSMART_ALIAS_DEEPSEEK_CHAT_TO", "deepseek-v4-flash"
     ),
@@ -1055,24 +1203,14 @@ def route_model_tier(payload: Dict[str, Any], session_key: str) -> str:
 # =====================================================================
 
 
-def clean_openai_model_name(model_name: str) -> str:
-    """Clean model name by removing organization prefix like "opencode-go/".
-    Preserve original for detection but clean for upstream request."""
-    # Strip everything before last slash if present (e.g. "opencode-go/muse" → "muse")
-    if "/" in model_name:
-        return model_name.rsplit("/", 1)[-1]
-    return model_name
-
-
-def is_openai_model(model_name: str) -> bool:
-    """Detect if model is OpenAI-native (requires protocol transformation)."""
-    lower_name = model_name.lower()
-    return any(pattern.lower() in lower_name for pattern in OPENAI_MODEL_PATTERNS)
+# NOTE: clean_openai_model_name / is_openai_model / resolve_openai_endpoint are defined
+# in Track A config section (lines 287-336) with OPENAI_MODEL_MAP support and
+# exported for track B/C. Do not redefine here; keep wrappers for compat.
 
 
 def is_anthropic_native_model(model_name: str) -> bool:
     """Detect models served by the Anthropic-compatible /messages endpoint
-    (OpenCode Go: minimax-m*, qwen3.*). These are Anthropic-native — no OpenAI
+    (OpenCode Go: minimax-m*, qwen3.*). These are Anthropic-native - no OpenAI
     protocol transform, model name preserved verbatim, raw SSE passthrough.
     Takes precedence over ``is_openai_model`` (a model is one or the other)."""
     lower_name = model_name.lower()
@@ -1080,17 +1218,12 @@ def is_anthropic_native_model(model_name: str) -> bool:
 
 
 def detect_openai_endpoint_type(model_name: str) -> str:
-    """Detect which OpenAI endpoint to use (chat_completions or responses)."""
-    lower_name = model_name.lower()
-    # Responses API families (per OpenCode Go model table): grok-*, gpt-5.6-*,
-    # muse-*, opencode-*. Everything else OpenAI (glm-,kimi-,longcat-,deepseek-,
-    # mimo-,hy3-,hy4-,text-...) is chat completions.
-    if any(pattern.lower() in lower_name for pattern in OPENAI_RESPONSES_MODEL_PATTERNS):
-        return "responses"
-    if "response" in lower_name or "responses" in lower_name:
-        return "responses"
-    # Default to chat completions for most OpenAI models
-    return "chat_completions"
+    """Detect which OpenAI endpoint to use (chat_completions or responses).
+    Thin wrapper over resolve_openai_endpoint (Track A) - preserves existing call sites."""
+    _rt = resolve_openai_endpoint(model_name)
+    if _rt == "messages":
+        return "chat_completions"
+    return _rt
 
 
 def _extract_system_text(system: Any) -> str:
