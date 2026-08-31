@@ -2189,9 +2189,294 @@ async def transform_openai_responses_sse_to_anthropic(
         continue
 
 
+async def transform_openai_responses_sse_to_openai_chat_sse(
+    sse_events: AsyncGenerator[Tuple[Optional[str], Dict[str, Any]], None],
+) -> AsyncGenerator[Tuple[Optional[str], Dict[str, Any]], None]:
+    """Transform OpenAI Responses API SSE stream → OpenAI Chat Completions SSE stream.
+
+    Responses API (upstream ``/v1/responses``) events:
+      response.created                     -> capture id/model/created
+      response.output_text.delta           -> choices[0].delta.content
+      response.output_item.added (fn)      -> choices[0].delta.tool_calls[0] (start)
+      response.function_call_arguments.delta -> choices[0].delta.tool_calls[0].function.arguments (stream)
+      response.reasoning_summary_text.delta -> choices[0].delta.reasoning_content
+      response.completed                   -> choices[0].finish_reason + [DONE]
+      [DONE] sentinel                      -> [DONE]
+
+    Reuses ``_iter_sse_events`` + ``_parse_sse_data`` via the ``sse_events``
+    generator (already parsed). Emits Chat Completions chunk dicts (to be
+    formatted as ``data: {...}\\n\\n``); the terminal marker is
+    ``{"__openai_done": True}`` mirroring the Anthropic adapters.
+    """
+    msg_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    model_name = ""
+    created = int(time.time())
+    tool_index_map: Dict[str, int] = {}
+    next_tool_index = 0
+    tool_args_buffer: Dict[int, str] = {}
+    async for event_name, openai_event in sse_events:
+        if openai_event.get("__openai_done"):
+            yield None, {"__openai_done": True}
+            break
+        event_type = openai_event.get("type", "") or ""
+        if not event_type:
+            continue
+        if event_type == "response.created":
+            resp = openai_event.get("response", {})
+            if isinstance(resp, dict):
+                rid = resp.get("id", "")
+                if rid:
+                    rid_str = str(rid)
+                    if rid_str.startswith("resp_"):
+                        msg_id = f"chatcmpl-{rid_str[5:29]}"
+                    else:
+                        msg_id = f"chatcmpl-{rid_str[:24]}"
+                if resp.get("model"):
+                    model_name = str(resp["model"])
+                c = resp.get("created")
+                if c is not None:
+                    try:
+                        created = int(c)
+                    except Exception:
+                        pass
+            continue
+        if event_type == "response.output_text.delta":
+            delta = openai_event.get("delta", "")
+            text = ""
+            if isinstance(delta, str):
+                text = delta
+            elif isinstance(delta, dict):
+                text = delta.get("text", "") or delta.get("delta", "") or ""
+            else:
+                text = str(delta) if delta else ""
+            if not text:
+                continue
+            chunk = {
+                "id": msg_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+            }
+            yield None, chunk
+            continue
+        if event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            delta = openai_event.get("delta", {})
+            text = ""
+            if isinstance(delta, dict):
+                text = delta.get("text", "") or delta.get("delta", "") or ""
+            elif isinstance(delta, str):
+                text = delta
+            if not text:
+                continue
+            chunk = {
+                "id": msg_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}],
+            }
+            yield None, chunk
+            continue
+        if event_type == "response.output_item.added":
+            item = openai_event.get("item", {})
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                call_id = item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
+                name = item.get("name", "")
+                idx = next_tool_index
+                tool_index_map[str(call_id)] = idx
+                next_tool_index += 1
+                tool_args_buffer[idx] = ""
+                chunk = {
+                    "id": msg_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "id": str(call_id), "type": "function", "function": {"name": name, "arguments": ""}}]}, "finish_reason": None}],
+                }
+                yield None, chunk
+                continue
+        if event_type == "response.function_call_arguments.delta":
+            delta = openai_event.get("delta", "")
+            if isinstance(delta, dict):
+                delta = delta.get("arguments", "") or delta.get("delta", "") or ""
+            if not isinstance(delta, str):
+                delta = str(delta) if delta else ""
+            if not delta:
+                continue
+            item_id = str(openai_event.get("item_id", "") or openai_event.get("call_id", "") or "")
+            idx = tool_index_map.get(item_id, 0) if item_id else 0
+            # fallback: if multiple tools, use last index if map miss
+            if item_id and idx not in tool_args_buffer and tool_args_buffer:
+                idx = max(tool_args_buffer.keys())
+            tool_args_buffer[idx] = tool_args_buffer.get(idx, "") + delta
+            chunk = {
+                "id": msg_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "function": {"arguments": delta}}]}, "finish_reason": None}],
+            }
+            yield None, chunk
+            continue
+        if event_type == "response.output_item.done":
+            item = openai_event.get("item", {})
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                call_id = str(item.get("id", "") or "")
+                idx = tool_index_map.get(call_id, 0)
+                args = item.get("arguments", "")
+                if isinstance(args, dict):
+                    try:
+                        args = json.dumps(args, sort_keys=True)
+                    except Exception:
+                        args = str(args)
+                buffered = tool_args_buffer.get(idx, "")
+                if args and not buffered:
+                    chunk = {
+                        "id": msg_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "function": {"arguments": str(args)}}]}, "finish_reason": None}],
+                    }
+                    yield None, chunk
+                continue
+        if event_type == "response.completed":
+            response = openai_event.get("response", {})
+            finish = "stop"
+            if isinstance(response, dict):
+                inc = response.get("incomplete_details") or {}
+                if isinstance(inc, dict) and inc.get("reason") == "max_output_tokens":
+                    finish = "length"
+                outputs = response.get("output", []) or []
+                for o in outputs:
+                    if isinstance(o, dict) and o.get("type") == "function_call":
+                        finish = "tool_calls"
+                        break
+                if response.get("model"):
+                    model_name = str(response["model"])
+            chunk = {
+                "id": msg_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+            }
+            yield None, chunk
+            yield None, {"__openai_done": True}
+            break
+        # skip ping / in_progress / content_part etc.
+        continue
+
+
+def transform_openai_responses_to_openai_chat_json(
+    payload: Dict[str, Any], model: str = ""
+) -> Dict[str, Any]:
+    """Transform OpenAI Responses API JSON response → OpenAI Chat Completions JSON.
+
+    Used for the non-streaming path when upstream is ``/v1/responses`` but the
+    downstream expects Chat Completions JSON (``choices[0].message.content``).
+    Mirrors ``transform_openai_responses_to_anthropic_json`` but targets the
+    Chat schema instead of Anthropic.
+    OpenAI Responses output items:
+      {"type":"message","role":"assistant","content":[{"type":"output_text","text":...}]}
+      {"type":"function_call","id":...,"name":...,"arguments":"{...}"}
+    """
+    text_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    finish = "stop"
+    for item in payload.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if itype == "message":
+            for part in item.get("content", []) or []:
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    txt = part.get("text", "")
+                    if txt:
+                        text_parts.append(str(txt))
+                elif isinstance(part, dict) and part.get("type") == "reasoning":
+                    txt = part.get("text", "") or part.get("summary", "")
+                    if txt:
+                        reasoning_parts.append(str(txt))
+        elif itype == "function_call":
+            call_id = item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
+            name = item.get("name", "")
+            args = item.get("arguments", "")
+            if isinstance(args, dict):
+                try:
+                    args = json.dumps(args, sort_keys=True)
+                except Exception:
+                    args = str(args)
+            tool_calls.append({"id": str(call_id), "type": "function", "function": {"name": str(name), "arguments": str(args or "")}})
+            finish = "tool_calls"
+        elif itype == "reasoning":
+            txt = item.get("summary", "") or item.get("text", "")
+            if txt:
+                if isinstance(txt, list):
+                    reasoning_parts.extend([str(t) for t in txt if t])
+                else:
+                    reasoning_parts.append(str(txt))
+    inc = payload.get("incomplete_details") or {}
+    if isinstance(inc, dict) and inc.get("reason") == "max_output_tokens":
+        finish = "length"
+    # content
+    content = "".join(text_parts)
+    message: Dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if reasoning_parts:
+        # Chat Completions uses reasoning_content on some providers (deepseek)
+        message["reasoning_content"] = "".join(reasoning_parts)
+    # id mapping: resp_xxx -> chatcmpl_xxx
+    raw_id = str(payload.get("id", "") or "")
+    if raw_id.startswith("resp_"):
+        chat_id = f"chatcmpl-{raw_id[5:29]}"
+    elif raw_id:
+        chat_id = f"chatcmpl-{raw_id[:24]}"
+    else:
+        chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = payload.get("created")
+    try:
+        created_int = int(created) if created is not None else int(time.time())
+    except Exception:
+        created_int = int(time.time())
+    usage = payload.get("usage", {}) or {}
+    prompt_tokens = int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", 0) or (prompt_tokens + completion_tokens))
+    chat_usage: Dict[str, Any] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
+    itd = usage.get("input_tokens_details") or {}
+    if isinstance(itd, dict) and itd.get("cached_tokens"):
+        try:
+            chat_usage["prompt_tokens_details"] = {"cached_tokens": int(itd["cached_tokens"])}
+        except Exception:
+            pass
+    return {
+        "id": chat_id,
+        "object": "chat.completion",
+        "created": created_int,
+        "model": model or str(payload.get("model", "") or ""),
+        "choices": [{"index": 0, "message": message, "finish_reason": finish, "logprobs": None}],
+        "usage": chat_usage,
+    }
+
+
+def _format_openai_chat_sse(payload: Dict[str, Any]) -> bytes:
+    """Format a Chat Completions chunk as SSE ``data:`` line.
+
+    Terminal sentinel ``{"__openai_done": True}`` becomes ``data: [DONE]``.
+    """
+    if payload.get("__openai_done"):
+        return b"data: [DONE]\n\n"
+    return f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
 # =====================================================================
 # 6. STREAMING REDACTOR (split-marker-safe unmask)
 # =====================================================================
+
 _MARKER_RE = re.compile(r"__CSMART_SEC_[0-9a-f]{8}__")
 _REDACTOR_TAIL = 64
 
@@ -2479,7 +2764,20 @@ class ProxyStreamer:
     """Stream upstream SSE to the client, shadowing tool_use locally:
     - ``csmart_expand_symbol`` -> expand from CCR (reversible compression).
     - guardrail violation      -> blocked result (secrets never reach client/upstream).
-    Other tool_use streams through unchanged (client executes it)."""
+    Other tool_use streams through unchanged (client executes it).
+
+    ``mode`` controls the wire format:
+      - ``"anthropic"``   (default): upstream already Anthropic Messages SSE
+        (``_sse_source`` yields ``(event, anthropic payload)``). This is the
+        legacy path; emits ``_format_event`` frames.
+      - ``"openai_chat"``: upstream is OpenAI Responses API. The body is
+        Anthropic-shaped; the streamer converts it to OpenAI Chat via
+        ``transform_openai_responses_sse_to_openai_chat_sse`` and emits
+        Chat Completions SSE (``data: {choices[..].delta}`` / ``[DONE]``).
+        Used when upstream ``endpoint_type == "responses"`` but the downstream
+        consumer requested Chat Completions. StreamingRedactor + SecretVault
+        are preserved — the caller wraps the streamer output via redactor.
+    """
 
     def __init__(
         self,
@@ -2487,16 +2785,22 @@ class ProxyStreamer:
         url: str,
         headers: Dict[str, str],
         body: Dict[str, Any],
+        mode: str = "anthropic",
     ) -> None:
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
+        self.mode = mode
         self.round = 1
         self.client_index = 0
         self._pending_held: List[Dict[str, Any]] = []
 
     async def run(self) -> AsyncGenerator[bytes, None]:
+        if self.mode == "openai_chat":
+            async for chunk in self._run_openai_chat():
+                yield chunk
+            return
         for _ in range(MAX_ROUNDS):
             messages = self.body.get("messages", [])
             self._pending_held = []
@@ -2510,6 +2814,25 @@ class ProxyStreamer:
             "error",
             {"type": "error", "error": {"type": "max_shadow_rounds", "message": "csmart: too many shadow rounds"}},
         )
+
+    async def _run_openai_chat(self) -> AsyncGenerator[bytes, None]:
+        """Responses → Chat streaming path with redactor-compatibility.
+
+        Upstream delivers Responses SSE (parsed via ``_sse_source``); the
+        adapter yields Chat Completions chunks. Shadowing of held tools is
+        intentionally not re-applied here — Chat downstream treats held calls
+        as regular tool_calls (same as the non-ProxyStreamer chat path). The
+        important invariant — StreamingRedactor + SecretVault — is kept by the
+        caller feeding each ``bytes`` chunk through ``StreamingRedactor.feed``.
+        """
+        # Note: shadowing in openai_chat mode is best-effort — held tool_use
+        # is forwarded to the client as-is (like the plain Chat path). A full
+        # shadow loop would require round-tripping Chat tool_calls back into
+        # Responses input items; out of scope for Track C (SSE adapter only).
+        async for _event_name, chunk in transform_openai_responses_sse_to_openai_chat_sse(
+            _sse_source(self.method, self.url, self.headers, self.body)
+        ):
+            yield _format_openai_chat_sse(chunk)
 
     async def _stream_round(
         self, messages: List[Dict[str, Any]]
