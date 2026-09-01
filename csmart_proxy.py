@@ -1553,6 +1553,150 @@ def transform_anthropic_to_openai_responses(payload: Dict[str, Any]) -> Dict[str
     return openai_payload
 
 
+
+def transform_openai_chat_to_responses(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform OpenAI Chat Completions payload -> OpenAI Responses payload.
+    Used by handle_openai_chat when resolve_openai_endpoint() returns "responses"
+    (e.g. muse-spark-1.2-contributor) but client sent /v1/chat/completions.
+    """
+    messages = payload.get("messages", [])
+    system_text = ""
+    input_items: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            if isinstance(content, str):
+                if content.strip():
+                    system_text = (system_text + "\n" + content) if system_text else content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        t = part.get("text", "")
+                        system_text = (system_text + "\n" + t) if system_text else t
+                    elif isinstance(part, str):
+                        system_text = (system_text + "\n" + part) if system_text else part
+            continue
+        # tool_calls -> function_call items
+        tool_calls = m.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            # preserve text content if any
+            if content:
+                if isinstance(content, str) and content.strip():
+                    input_items.append({"type": "message", "role": role, "content": content})
+                elif isinstance(content, list):
+                    txt = "".join(
+                        pp.get("text", "") for pp in content if isinstance(pp, dict) and pp.get("type") == "text"
+                    )
+                    if txt.strip():
+                        input_items.append({"type": "message", "role": role, "content": txt})
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function", tc) if isinstance(tc.get("function"), dict) else tc
+                # tc may be flat or nested
+                if "function" in tc and isinstance(tc["function"], dict):
+                    fn = tc["function"]
+                    call_id = tc.get("id") or fn.get("id") or f"call_{len(input_items)}"
+                    name = fn.get("name", "")
+                    arguments = fn.get("arguments", "")
+                else:
+                    call_id = tc.get("id") or tc.get("call_id") or f"call_{len(input_items)}"
+                    name = tc.get("name", fn.get("name", ""))
+                    arguments = tc.get("arguments", fn.get("arguments", ""))
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments, sort_keys=True)
+                if not isinstance(arguments, str):
+                    arguments = str(arguments)
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                })
+            continue
+        if role == "tool":
+            tool_call_id = m.get("tool_call_id") or m.get("call_id") or ""
+            output = content if isinstance(content, str) else json.dumps(content, sort_keys=True) if content is not None else ""
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": tool_call_id,
+                "output": str(output),
+            })
+            continue
+        # normal message
+        if isinstance(content, str):
+            input_items.append({"type": "message", "role": role, "content": content})
+        elif isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        # image_url -> keep as text placeholder for now
+                        img = part.get("image_url", {})
+                        url = img.get("url", "") if isinstance(img, dict) else str(img)
+                        if url:
+                            text_parts.append(f"[image: {url}]")
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            txt = "\n".join(text_parts)
+            if role == "assistant":
+                input_items.append({"type": "message", "role": role, "content": [{"type": "output_text", "text": txt}]})
+            else:
+                input_items.append({"type": "message", "role": role, "content": txt})
+        elif content is not None:
+            input_items.append({"type": "message", "role": role, "content": str(content)})
+    openai_payload: Dict[str, Any] = {
+        "model": payload.get("model"),
+        "input": input_items,
+        "stream": payload.get("stream", False),
+    }
+    if system_text.strip():
+        openai_payload["instructions"] = system_text.strip()
+    # map common params
+    if "temperature" in payload:
+        openai_payload["temperature"] = payload["temperature"]
+    if "top_p" in payload:
+        openai_payload["top_p"] = payload["top_p"]
+    if "max_tokens" in payload:
+        openai_payload["max_output_tokens"] = payload["max_tokens"]
+    if "max_completion_tokens" in payload:
+        openai_payload["max_output_tokens"] = payload["max_completion_tokens"]
+    if "max_output_tokens" in payload:
+        openai_payload["max_output_tokens"] = payload["max_output_tokens"]
+    # tools: chat format {type:function, function:{name,description,parameters}} -> responses flat
+    if "tools" in payload and isinstance(payload["tools"], list):
+        chat_tools = payload["tools"]
+        resp_tools: List[Dict[str, Any]] = []
+        for t in chat_tools:
+            if not isinstance(t, dict):
+                continue
+            if "function" in t and isinstance(t["function"], dict):
+                fn = t["function"]
+                resp_tools.append({
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                })
+            else:
+                # already flat or unknown - pass through
+                resp_tools.append(t)
+        if resp_tools:
+            openai_payload["tools"] = resp_tools
+    if "tool_choice" in payload:
+        openai_payload["tool_choice"] = payload["tool_choice"]
+    if "parallel_tool_calls" in payload:
+        openai_payload["parallel_tool_calls"] = payload["parallel_tool_calls"]
+    if "reasoning_effort" in payload:
+        openai_payload["reasoning"] = {"effort": payload["reasoning_effort"]}
+    return openai_payload
+
+
 def _resolve_reasoning_effort(payload: Dict[str, Any]) -> Optional[str]:
     """Resolve Anthropic reasoning/thinking config to an OpenAI Responses effort.
 
@@ -2189,294 +2333,9 @@ async def transform_openai_responses_sse_to_anthropic(
         continue
 
 
-async def transform_openai_responses_sse_to_openai_chat_sse(
-    sse_events: AsyncGenerator[Tuple[Optional[str], Dict[str, Any]], None],
-) -> AsyncGenerator[Tuple[Optional[str], Dict[str, Any]], None]:
-    """Transform OpenAI Responses API SSE stream → OpenAI Chat Completions SSE stream.
-
-    Responses API (upstream ``/v1/responses``) events:
-      response.created                     -> capture id/model/created
-      response.output_text.delta           -> choices[0].delta.content
-      response.output_item.added (fn)      -> choices[0].delta.tool_calls[0] (start)
-      response.function_call_arguments.delta -> choices[0].delta.tool_calls[0].function.arguments (stream)
-      response.reasoning_summary_text.delta -> choices[0].delta.reasoning_content
-      response.completed                   -> choices[0].finish_reason + [DONE]
-      [DONE] sentinel                      -> [DONE]
-
-    Reuses ``_iter_sse_events`` + ``_parse_sse_data`` via the ``sse_events``
-    generator (already parsed). Emits Chat Completions chunk dicts (to be
-    formatted as ``data: {...}\\n\\n``); the terminal marker is
-    ``{"__openai_done": True}`` mirroring the Anthropic adapters.
-    """
-    msg_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    model_name = ""
-    created = int(time.time())
-    tool_index_map: Dict[str, int] = {}
-    next_tool_index = 0
-    tool_args_buffer: Dict[int, str] = {}
-    async for event_name, openai_event in sse_events:
-        if openai_event.get("__openai_done"):
-            yield None, {"__openai_done": True}
-            break
-        event_type = openai_event.get("type", "") or ""
-        if not event_type:
-            continue
-        if event_type == "response.created":
-            resp = openai_event.get("response", {})
-            if isinstance(resp, dict):
-                rid = resp.get("id", "")
-                if rid:
-                    rid_str = str(rid)
-                    if rid_str.startswith("resp_"):
-                        msg_id = f"chatcmpl-{rid_str[5:29]}"
-                    else:
-                        msg_id = f"chatcmpl-{rid_str[:24]}"
-                if resp.get("model"):
-                    model_name = str(resp["model"])
-                c = resp.get("created")
-                if c is not None:
-                    try:
-                        created = int(c)
-                    except Exception:
-                        pass
-            continue
-        if event_type == "response.output_text.delta":
-            delta = openai_event.get("delta", "")
-            text = ""
-            if isinstance(delta, str):
-                text = delta
-            elif isinstance(delta, dict):
-                text = delta.get("text", "") or delta.get("delta", "") or ""
-            else:
-                text = str(delta) if delta else ""
-            if not text:
-                continue
-            chunk = {
-                "id": msg_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-            }
-            yield None, chunk
-            continue
-        if event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
-            delta = openai_event.get("delta", {})
-            text = ""
-            if isinstance(delta, dict):
-                text = delta.get("text", "") or delta.get("delta", "") or ""
-            elif isinstance(delta, str):
-                text = delta
-            if not text:
-                continue
-            chunk = {
-                "id": msg_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}],
-            }
-            yield None, chunk
-            continue
-        if event_type == "response.output_item.added":
-            item = openai_event.get("item", {})
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                call_id = item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
-                name = item.get("name", "")
-                idx = next_tool_index
-                tool_index_map[str(call_id)] = idx
-                next_tool_index += 1
-                tool_args_buffer[idx] = ""
-                chunk = {
-                    "id": msg_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "id": str(call_id), "type": "function", "function": {"name": name, "arguments": ""}}]}, "finish_reason": None}],
-                }
-                yield None, chunk
-                continue
-        if event_type == "response.function_call_arguments.delta":
-            delta = openai_event.get("delta", "")
-            if isinstance(delta, dict):
-                delta = delta.get("arguments", "") or delta.get("delta", "") or ""
-            if not isinstance(delta, str):
-                delta = str(delta) if delta else ""
-            if not delta:
-                continue
-            item_id = str(openai_event.get("item_id", "") or openai_event.get("call_id", "") or "")
-            idx = tool_index_map.get(item_id, 0) if item_id else 0
-            # fallback: if multiple tools, use last index if map miss
-            if item_id and idx not in tool_args_buffer and tool_args_buffer:
-                idx = max(tool_args_buffer.keys())
-            tool_args_buffer[idx] = tool_args_buffer.get(idx, "") + delta
-            chunk = {
-                "id": msg_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "function": {"arguments": delta}}]}, "finish_reason": None}],
-            }
-            yield None, chunk
-            continue
-        if event_type == "response.output_item.done":
-            item = openai_event.get("item", {})
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                call_id = str(item.get("id", "") or "")
-                idx = tool_index_map.get(call_id, 0)
-                args = item.get("arguments", "")
-                if isinstance(args, dict):
-                    try:
-                        args = json.dumps(args, sort_keys=True)
-                    except Exception:
-                        args = str(args)
-                buffered = tool_args_buffer.get(idx, "")
-                if args and not buffered:
-                    chunk = {
-                        "id": msg_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_name,
-                        "choices": [{"index": 0, "delta": {"tool_calls": [{"index": idx, "function": {"arguments": str(args)}}]}, "finish_reason": None}],
-                    }
-                    yield None, chunk
-                continue
-        if event_type == "response.completed":
-            response = openai_event.get("response", {})
-            finish = "stop"
-            if isinstance(response, dict):
-                inc = response.get("incomplete_details") or {}
-                if isinstance(inc, dict) and inc.get("reason") == "max_output_tokens":
-                    finish = "length"
-                outputs = response.get("output", []) or []
-                for o in outputs:
-                    if isinstance(o, dict) and o.get("type") == "function_call":
-                        finish = "tool_calls"
-                        break
-                if response.get("model"):
-                    model_name = str(response["model"])
-            chunk = {
-                "id": msg_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-            }
-            yield None, chunk
-            yield None, {"__openai_done": True}
-            break
-        # skip ping / in_progress / content_part etc.
-        continue
-
-
-def transform_openai_responses_to_openai_chat_json(
-    payload: Dict[str, Any], model: str = ""
-) -> Dict[str, Any]:
-    """Transform OpenAI Responses API JSON response → OpenAI Chat Completions JSON.
-
-    Used for the non-streaming path when upstream is ``/v1/responses`` but the
-    downstream expects Chat Completions JSON (``choices[0].message.content``).
-    Mirrors ``transform_openai_responses_to_anthropic_json`` but targets the
-    Chat schema instead of Anthropic.
-    OpenAI Responses output items:
-      {"type":"message","role":"assistant","content":[{"type":"output_text","text":...}]}
-      {"type":"function_call","id":...,"name":...,"arguments":"{...}"}
-    """
-    text_parts: List[str] = []
-    reasoning_parts: List[str] = []
-    tool_calls: List[Dict[str, Any]] = []
-    finish = "stop"
-    for item in payload.get("output", []) or []:
-        if not isinstance(item, dict):
-            continue
-        itype = item.get("type")
-        if itype == "message":
-            for part in item.get("content", []) or []:
-                if isinstance(part, dict) and part.get("type") == "output_text":
-                    txt = part.get("text", "")
-                    if txt:
-                        text_parts.append(str(txt))
-                elif isinstance(part, dict) and part.get("type") == "reasoning":
-                    txt = part.get("text", "") or part.get("summary", "")
-                    if txt:
-                        reasoning_parts.append(str(txt))
-        elif itype == "function_call":
-            call_id = item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex[:8]}"
-            name = item.get("name", "")
-            args = item.get("arguments", "")
-            if isinstance(args, dict):
-                try:
-                    args = json.dumps(args, sort_keys=True)
-                except Exception:
-                    args = str(args)
-            tool_calls.append({"id": str(call_id), "type": "function", "function": {"name": str(name), "arguments": str(args or "")}})
-            finish = "tool_calls"
-        elif itype == "reasoning":
-            txt = item.get("summary", "") or item.get("text", "")
-            if txt:
-                if isinstance(txt, list):
-                    reasoning_parts.extend([str(t) for t in txt if t])
-                else:
-                    reasoning_parts.append(str(txt))
-    inc = payload.get("incomplete_details") or {}
-    if isinstance(inc, dict) and inc.get("reason") == "max_output_tokens":
-        finish = "length"
-    # content
-    content = "".join(text_parts)
-    message: Dict[str, Any] = {"role": "assistant", "content": content}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-    if reasoning_parts:
-        # Chat Completions uses reasoning_content on some providers (deepseek)
-        message["reasoning_content"] = "".join(reasoning_parts)
-    # id mapping: resp_xxx -> chatcmpl_xxx
-    raw_id = str(payload.get("id", "") or "")
-    if raw_id.startswith("resp_"):
-        chat_id = f"chatcmpl-{raw_id[5:29]}"
-    elif raw_id:
-        chat_id = f"chatcmpl-{raw_id[:24]}"
-    else:
-        chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    created = payload.get("created")
-    try:
-        created_int = int(created) if created is not None else int(time.time())
-    except Exception:
-        created_int = int(time.time())
-    usage = payload.get("usage", {}) or {}
-    prompt_tokens = int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0)
-    completion_tokens = int(usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", 0) or (prompt_tokens + completion_tokens))
-    chat_usage: Dict[str, Any] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
-    itd = usage.get("input_tokens_details") or {}
-    if isinstance(itd, dict) and itd.get("cached_tokens"):
-        try:
-            chat_usage["prompt_tokens_details"] = {"cached_tokens": int(itd["cached_tokens"])}
-        except Exception:
-            pass
-    return {
-        "id": chat_id,
-        "object": "chat.completion",
-        "created": created_int,
-        "model": model or str(payload.get("model", "") or ""),
-        "choices": [{"index": 0, "message": message, "finish_reason": finish, "logprobs": None}],
-        "usage": chat_usage,
-    }
-
-
-def _format_openai_chat_sse(payload: Dict[str, Any]) -> bytes:
-    """Format a Chat Completions chunk as SSE ``data:`` line.
-
-    Terminal sentinel ``{"__openai_done": True}`` becomes ``data: [DONE]``.
-    """
-    if payload.get("__openai_done"):
-        return b"data: [DONE]\n\n"
-    return f"data: {json.dumps(payload)}\n\n".encode("utf-8")
-
-
 # =====================================================================
 # 6. STREAMING REDACTOR (split-marker-safe unmask)
 # =====================================================================
-
 _MARKER_RE = re.compile(r"__CSMART_SEC_[0-9a-f]{8}__")
 _REDACTOR_TAIL = 64
 
@@ -2764,20 +2623,7 @@ class ProxyStreamer:
     """Stream upstream SSE to the client, shadowing tool_use locally:
     - ``csmart_expand_symbol`` -> expand from CCR (reversible compression).
     - guardrail violation      -> blocked result (secrets never reach client/upstream).
-    Other tool_use streams through unchanged (client executes it).
-
-    ``mode`` controls the wire format:
-      - ``"anthropic"``   (default): upstream already Anthropic Messages SSE
-        (``_sse_source`` yields ``(event, anthropic payload)``). This is the
-        legacy path; emits ``_format_event`` frames.
-      - ``"openai_chat"``: upstream is OpenAI Responses API. The body is
-        Anthropic-shaped; the streamer converts it to OpenAI Chat via
-        ``transform_openai_responses_sse_to_openai_chat_sse`` and emits
-        Chat Completions SSE (``data: {choices[..].delta}`` / ``[DONE]``).
-        Used when upstream ``endpoint_type == "responses"`` but the downstream
-        consumer requested Chat Completions. StreamingRedactor + SecretVault
-        are preserved — the caller wraps the streamer output via redactor.
-    """
+    Other tool_use streams through unchanged (client executes it)."""
 
     def __init__(
         self,
@@ -2785,22 +2631,16 @@ class ProxyStreamer:
         url: str,
         headers: Dict[str, str],
         body: Dict[str, Any],
-        mode: str = "anthropic",
     ) -> None:
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
-        self.mode = mode
         self.round = 1
         self.client_index = 0
         self._pending_held: List[Dict[str, Any]] = []
 
     async def run(self) -> AsyncGenerator[bytes, None]:
-        if self.mode == "openai_chat":
-            async for chunk in self._run_openai_chat():
-                yield chunk
-            return
         for _ in range(MAX_ROUNDS):
             messages = self.body.get("messages", [])
             self._pending_held = []
@@ -2814,25 +2654,6 @@ class ProxyStreamer:
             "error",
             {"type": "error", "error": {"type": "max_shadow_rounds", "message": "csmart: too many shadow rounds"}},
         )
-
-    async def _run_openai_chat(self) -> AsyncGenerator[bytes, None]:
-        """Responses → Chat streaming path with redactor-compatibility.
-
-        Upstream delivers Responses SSE (parsed via ``_sse_source``); the
-        adapter yields Chat Completions chunks. Shadowing of held tools is
-        intentionally not re-applied here — Chat downstream treats held calls
-        as regular tool_calls (same as the non-ProxyStreamer chat path). The
-        important invariant — StreamingRedactor + SecretVault — is kept by the
-        caller feeding each ``bytes`` chunk through ``StreamingRedactor.feed``.
-        """
-        # Note: shadowing in openai_chat mode is best-effort — held tool_use
-        # is forwarded to the client as-is (like the plain Chat path). A full
-        # shadow loop would require round-tripping Chat tool_calls back into
-        # Responses input items; out of scope for Track C (SSE adapter only).
-        async for _event_name, chunk in transform_openai_responses_sse_to_openai_chat_sse(
-            _sse_source(self.method, self.url, self.headers, self.body)
-        ):
-            yield _format_openai_chat_sse(chunk)
 
     async def _stream_round(
         self, messages: List[Dict[str, Any]]
@@ -3363,11 +3184,159 @@ async def handle_messages(request: Request) -> StreamingResponse | JSONResponse:
 _PASSTHROUGH_HEADERS = {"anthropic-version"}
 
 
+@app.post("/v1/chat/completions")
+async def handle_openai_chat(request: Request) -> StreamingResponse:
+    """OpenAI Chat Completions endpoint for AnythingLLM (and compatibles).
+
+    Route via resolve_openai_endpoint(). If endpoint_type=="responses" -> 
+    transform_openai_chat_to_responses() then forward to OPENAI_BASE_URL+OPENAI_RESPONSES_PATH
+    else forward directly to /chat/completions. Auth via _openai_upstream_headers().
+    """
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object.")
+    model = str(body.get("model", "")).strip()
+    cleaned = clean_openai_model_name(model)
+    if cleaned in OPENAI_MODEL_ALIASES:
+        cleaned = OPENAI_MODEL_ALIASES[cleaned]
+    endpoint_type = resolve_openai_endpoint(model)
+    headers = _openai_upstream_headers(request)
+    if endpoint_type == "responses":
+        payload = transform_openai_chat_to_responses(body)
+        # keep the (possibly aliased) model id in the transformed payload
+        if cleaned and payload.get("model") != cleaned:
+            payload["model"] = cleaned or payload.get("model")
+        body_bytes = json.dumps(payload).encode("utf-8")
+        target = f"{OPENAI_BASE_URL}{OPENAI_RESPONSES_PATH}"
+        _log("OPENAI_CHAT_TO_RESPONSES", model=model, cleaned=cleaned, target=target)
+    else:
+        # chat_completions: forward as-is (preserve alias-cleaned model id)
+        if cleaned and body.get("model") != cleaned:
+            body["model"] = cleaned
+        body_bytes = json.dumps(body).encode("utf-8")
+        target = f"{OPENAI_BASE_URL}{OPENAI_CHAT_COMPLETIONS_PATH}"
+        _log("OPENAI_CHAT_PASSTHROUGH", model=model, cleaned=cleaned, target=target)
+    # stream passthrough — do not touch upstream SSE here
+    headers.setdefault("Content-Type", "application/json")
+
+    async def _gen() -> AsyncGenerator[bytes, None]:
+        async with httpx.AsyncClient(transport=_UPSTREAM_TRANSPORT, timeout=UPSTREAM_TIMEOUT) as client:
+            req = client.build_request("POST", target, headers=headers, content=body_bytes)
+            resp = await client.send(req, stream=True)
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+
+    # upstream is already OpenAI-shaped; stream raw
+    media = "text/event-stream" if body.get("stream") else "application/json"
+    return StreamingResponse(_gen(), media_type=media)
+
+
+@app.post("/v1/responses")
+async def handle_openai_responses(request: Request) -> StreamingResponse:
+    """OpenAI Responses passthrough for AnythingLLM that targets /v1/responses."""
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object.")
+    model = str(body.get("model", "")).strip()
+    cleaned = clean_openai_model_name(model)
+    if cleaned in OPENAI_MODEL_ALIASES:
+        cleaned = OPENAI_MODEL_ALIASES[cleaned]
+    if cleaned and body.get("model") != cleaned:
+        body["model"] = cleaned
+    headers = _openai_upstream_headers(request)
+    headers.setdefault("Content-Type", "application/json")
+    body_bytes = json.dumps(body).encode("utf-8")
+    target = f"{OPENAI_BASE_URL}{OPENAI_RESPONSES_PATH}"
+    _log("OPENAI_RESPONSES_PASSTHROUGH", model=model, cleaned=cleaned, target=target)
+
+    async def _gen() -> AsyncGenerator[bytes, None]:
+        async with httpx.AsyncClient(transport=_UPSTREAM_TRANSPORT, timeout=UPSTREAM_TIMEOUT) as client:
+            req = client.build_request("POST", target, headers=headers, content=body_bytes)
+            resp = await client.send(req, stream=True)
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+
+    media = "text/event-stream" if body.get("stream") else "application/json"
+    return StreamingResponse(_gen(), media_type=media)
+
+
+@app.get("/v1/models")
+async def handle_models(request: Request) -> JSONResponse:
+    """Return OpenAI-shaped model list: union of OPENAI_MODEL_MAP + upstream GET /v1/models."""
+    data: List[Dict[str, Any]] = []
+    seen: set = set()
+    for alias, info in OPENAI_MODEL_MAP.items():
+        if alias not in seen:
+            seen.add(alias)
+            data.append({"id": alias, "object": "model", "created": 0, "owned_by": "opencode"})
+        tgt = str(info.get("target", "")).strip()
+        if tgt and tgt not in seen:
+            seen.add(tgt)
+            data.append({"id": tgt, "object": "model", "created": 0, "owned_by": "opencode"})
+    # also include pattern families for completeness
+    for pat in OPENAI_MODEL_PATTERNS:
+        key = pat.rstrip("-*").strip()
+        if key and key not in seen:
+            seen.add(key)
+            data.append({"id": pat, "object": "model", "created": 0, "owned_by": "opencode"})
+    # fetch upstream models (best-effort)
+    _upstream_models: List[Dict[str, Any]] = []
+    headers = _openai_upstream_headers(request)
+    try:
+        async with httpx.AsyncClient(transport=_UPSTREAM_TRANSPORT, timeout=10.0) as client:
+            resp = await client.get(f"{OPENAI_BASE_URL}/v1/models", headers=headers)
+            if resp.status_code < 400:
+                j = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                raw = j.get("data") if isinstance(j, dict) else None
+                if isinstance(raw, list):
+                    for entry in raw:
+                        if isinstance(entry, dict) and "id" in entry:
+                            mid = str(entry["id"])
+                            if mid not in seen:
+                                seen.add(mid)
+                                data.append({"id": mid, "object": "model", "created": entry.get("created", 0), "owned_by": entry.get("owned_by", "opencode")})
+                        elif isinstance(entry, str) and entry not in seen:
+                            seen.add(entry)
+                            data.append({"id": entry, "object": "model", "created": 0, "owned_by": "opencode"})
+    except Exception as exc:
+        _log("MODELS_UPSTREAM_FETCH_FAILED", error=str(exc)[:200])
+    _log("MODELS_LIST", count=len(data))
+    return JSONResponse({"object": "list", "data": data})
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def passthrough(request: Request, path: str) -> StreamingResponse:
-    """Forward non-messages endpoints (e.g. GET /v1/models, /v1/messages/count_tokens)."""
-    target = f"{UPSTREAM_BASE_URL}/{path}"
+    """Forward non-messages endpoints (e.g. GET /v1/models, /v1/messages/count_tokens).
+
+    Refactored per Track B spec: if path startswith "v1/" and is_openai_model
+    (from query/body), forward to OPENAI_BASE_URL else UPSTREAM_BASE_URL.
+    Streaming logic unchanged.
+    """
     body_bytes = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
+    is_v1 = path.startswith("v1/") or path.startswith("/v1/")
+    target_base = UPSTREAM_BASE_URL
+    if is_v1:
+        model_hint = ""
+        try:
+            model_hint = request.query_params.get("model", "") or ""
+        except Exception:
+            model_hint = ""
+        if not model_hint and body_bytes:
+            try:
+                _j = json.loads(body_bytes.decode("utf-8"))
+                if isinstance(_j, dict):
+                    model_hint = str(_j.get("model", ""))
+            except Exception:
+                model_hint = ""
+        if model_hint and is_openai_model(model_hint):
+            target_base = OPENAI_BASE_URL
+    target = f"{target_base}/{path}"
     headers: Dict[str, str] = {"Authorization": f"Bearer {UPSTREAM_API_KEY}"}
     for name, val in request.headers.items():
         if name.lower() in _PASSTHROUGH_HEADERS:
