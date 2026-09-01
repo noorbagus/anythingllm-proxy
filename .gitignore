@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Caches / tools
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+
+# Project runtime
+.csmart/
+csmart_state.db
+*.db
+*.log
+
+# Graphify cache (keep graph.json/report if needed, ignore heavy cache)
+graphify-out/cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets — never commit real keys
+.env
+.env.local
+PrivateLink/
+credentials/

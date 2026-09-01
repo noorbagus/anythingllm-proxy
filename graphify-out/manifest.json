@@ -1,0 +1,242 @@
+{
+  ".claude/settings.local.json": {
+    "mtime": 1788045473.0,
+    "seen": 1788280073.7946088,
+    "ast_hash": "a044b397d6dd3ad4d87c904bbb1a35d4",
+    "semantic_hash": ""
+  },
+  ".csmart/last-report.json": {
+    "mtime": 1787936365.0,
+    "seen": 1788280073.794613,
+    "ast_hash": "7fcc5e7aaddca68b194454341abd7833",
+    "semantic_hash": ""
+  },
+  "csmart/__init__.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.794615,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "csmart/app/__init__.py": {
+    "mtime": 1788278885.0,
+    "seen": 1788280073.794616,
+    "ast_hash": "fe15885cc8860efc96a28ab97d57ddb8",
+    "semantic_hash": ""
+  },
+  "csmart/app/config.py": {
+    "mtime": 1788278855.0,
+    "seen": 1788280073.7946172,
+    "ast_hash": "0e4bd1536b5e85602763b081f1315d8d",
+    "semantic_hash": ""
+  },
+  "csmart/app/factory.py": {
+    "mtime": 1788279019.0,
+    "seen": 1788280073.7946181,
+    "ast_hash": "593a4c89ab67080ae2b5c60b5d0e60c1",
+    "semantic_hash": ""
+  },
+  "csmart/app/keepalive.py": {
+    "mtime": 1788279232.0,
+    "seen": 1788280073.7946188,
+    "ast_hash": "233cbc865b58d738fe3fc79032634217",
+    "semantic_hash": ""
+  },
+  "csmart/handlers/__init__.py": {
+    "mtime": 1788279138.0,
+    "seen": 1788280073.7946198,
+    "ast_hash": "5f86cb21c300d75850bfd7e6218b9127",
+    "semantic_hash": ""
+  },
+  "csmart/handlers/messages.py": {
+    "mtime": 1788279220.0,
+    "seen": 1788280073.7946198,
+    "ast_hash": "1b2924eb7b34308e42707efa9720779c",
+    "semantic_hash": ""
+  },
+  "csmart/handlers/openai.py": {
+    "mtime": 1788279227.0,
+    "seen": 1788280073.794621,
+    "ast_hash": "613f8fa0b6474019c9099ca14b86025c",
+    "semantic_hash": ""
+  },
+  "csmart/logging/__init__.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.794622,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "csmart/logging/structured.py": {
+    "mtime": 1788261474.0,
+    "seen": 1788280073.794623,
+    "ast_hash": "3a3e7abe9804e72fcbd19d4a81b00f17",
+    "semantic_hash": ""
+  },
+  "csmart/routing/__init__.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.794624,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "csmart/routing/model.py": {
+    "mtime": 1788262599.0,
+    "seen": 1788280073.794625,
+    "ast_hash": "01594c692494284c97fcbb3a8fc0ba2a",
+    "semantic_hash": ""
+  },
+  "csmart/routing/token_limits.py": {
+    "mtime": 1788262605.0,
+    "seen": 1788280073.794625,
+    "ast_hash": "04b868b999006dfae6f9824b95f120e9",
+    "semantic_hash": ""
+  },
+  "csmart/security/__init__.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.794626,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "csmart/security/guardrails.py": {
+    "mtime": 1788262876.0,
+    "seen": 1788280073.7946272,
+    "ast_hash": "b9324c609691ae19b1e35fa4e78a8672",
+    "semantic_hash": ""
+  },
+  "csmart/security/secrets.py": {
+    "mtime": 1788261139.0,
+    "seen": 1788280073.7946281,
+    "ast_hash": "615fd8eb04a2a1ad8d2367edbb87810c",
+    "semantic_hash": ""
+  },
+  "csmart/streaming/__init__.py": {
+    "mtime": 1788279237.0,
+    "seen": 1788280073.794629,
+    "ast_hash": "768800fc948b522915724109ff3bac74",
+    "semantic_hash": ""
+  },
+  "csmart/streaming/proxy_streamer.py": {
+    "mtime": 1788278884.0,
+    "seen": 1788280073.7946298,
+    "ast_hash": "0b2cce4ea14ef7f3b9563b848566214c",
+    "semantic_hash": ""
+  },
+  "csmart/streaming/redactor.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.7946298,
+    "ast_hash": "588d7bad0b2076be8c0807f92c2f53de",
+    "semantic_hash": ""
+  },
+  "csmart/streaming/sse.py": {
+    "mtime": 1788279233.0,
+    "seen": 1788280073.794631,
+    "ast_hash": "3b8aa26be2594d7208cd5a7447195848",
+    "semantic_hash": ""
+  },
+  "csmart/transform/__init__.py": {
+    "mtime": 1788260935.0,
+    "seen": 1788280073.794632,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "csmart/transform/anthropic_to_openai.py": {
+    "mtime": 1788276001.0,
+    "seen": 1788280073.794633,
+    "ast_hash": "e8167c715587b329377ce003ad899a12",
+    "semantic_hash": ""
+  },
+  "csmart/transform/openai_to_anthropic.py": {
+    "mtime": 1788277192.0,
+    "seen": 1788280073.7946339,
+    "ast_hash": "ac52b3be6e95d7257936f9faeb1845a9",
+    "semantic_hash": ""
+  },
+  "csmart_proxy.py": {
+    "mtime": 1788278859.0,
+    "seen": 1788280073.794635,
+    "ast_hash": "dcdbcf214d4a2cca3e6bc4c8f3d387b1",
+    "semantic_hash": ""
+  },
+  "opencode.json": {
+    "mtime": 1788049214.0,
+    "seen": 1788280073.794636,
+    "ast_hash": "e0b86e0102bc429451a937d202d80149",
+    "semantic_hash": ""
+  },
+  "tests/test_w3_handlers.py": {
+    "mtime": 1788279289.0,
+    "seen": 1788280073.794636,
+    "ast_hash": "a86ecba38a4cc3a6541a32ffd8c4c300",
+    "semantic_hash": ""
+  },
+  ".csmart/csmart-routing-map.html": {
+    "mtime": 1787927249.0,
+    "seen": 1788280073.794637,
+    "ast_hash": "9141a55c6b54cabb40c1ee72ac75f72c",
+    "semantic_hash": ""
+  },
+  "checklist/README.md": {
+    "mtime": 1788260987.0,
+    "seen": 1788280073.7946382,
+    "ast_hash": "acf24c029ea5040ed184dc3422c56e51",
+    "semantic_hash": ""
+  },
+  "checklist/dod.md": {
+    "mtime": 1788279985.0,
+    "seen": 1788280073.794639,
+    "ast_hash": "d28c56a1685419cd015f7d6ded48dd4b",
+    "semantic_hash": ""
+  },
+  "checklist/progress.md": {
+    "mtime": 1788280039.0,
+    "seen": 1788280073.794639,
+    "ast_hash": "fc64c53648e89eb8c97c906fb1005558",
+    "semantic_hash": ""
+  },
+  "checklist/prompts/w1-t1-app-config.md": {
+    "mtime": 1788261292.0,
+    "seen": 1788280073.7946398,
+    "ast_hash": "805cc6b9ff8a47bbb30ef13f4d2e618a",
+    "semantic_hash": ""
+  },
+  "checklist/prompts/w1-t1-routing-model.md": {
+    "mtime": 1788261754.0,
+    "seen": 1788280073.7946408,
+    "ast_hash": "2c356453fe8bf6902646beb7df47a4c3",
+    "semantic_hash": ""
+  },
+  "checklist/prompts/w2-early-guardrails.md": {
+    "mtime": 1788261774.0,
+    "seen": 1788280073.794642,
+    "ast_hash": "44890e81e2f2cd393a92e1b7d1e0b7ac",
+    "semantic_hash": ""
+  },
+  "checklist/prompts/w2-early-proxy-streamer.md": {
+    "mtime": 1788261799.0,
+    "seen": 1788280073.794643,
+    "ast_hash": "825456532e0989a8c9f00f7ead8423bc",
+    "semantic_hash": ""
+  },
+  "checklist/w0-gate.md": {
+    "mtime": 1788261030.0,
+    "seen": 1788280073.794643,
+    "ast_hash": "c78b6f70ddf58e45768545cd7f2ffe02",
+    "semantic_hash": ""
+  },
+  "checklist/w1-foundation.md": {
+    "mtime": 1788261512.0,
+    "seen": 1788280073.7946439,
+    "ast_hash": "a5a2e73258901aecd93030212a2b9083",
+    "semantic_hash": ""
+  },
+  "checklist/w2-integration.md": {
+    "mtime": 1788261061.0,
+    "seen": 1788280073.794645,
+    "ast_hash": "52bcb0e7e6c6f0478bd9fb76f90ab31d",
+    "semantic_hash": ""
+  },
+  "checklist/w3-final.md": {
+    "mtime": 1788261074.0,
+    "seen": 1788280073.794646,
+    "ast_hash": "98947499c7a68028de1018ae05052b5a",
+    "semantic_hash": ""
+  }
+}
